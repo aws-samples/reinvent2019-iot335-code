@@ -1,0 +1,193 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+
+  "Description" : "AWS CloudFormation template for IoT multi region. Master region.",
+
+  "Parameters" : {
+    "S3BucketForLambda" : {
+      "Description" : "S3 bucket where you copied the lambda installation packages to.",
+      "Type" : "String"
+    }
+  },
+
+  "Resources" : {
+
+    "ProvisioningDynamoDBTable" : {
+      "Type" : "AWS::DynamoDB::Table",
+          "Properties" : {
+            "TableName": "IoTMRProvisioning",
+            "AttributeDefinitions" : [
+              {
+                  "AttributeName": "uuid",
+                  "AttributeType": "S"
+              }
+            ],
+            "KeySchema" : [
+              {
+                  "KeyType": "HASH",
+                  "AttributeName": "uuid"
+              }
+            ],
+            "ProvisionedThroughput" : {
+              "WriteCapacityUnits": 10,
+              "ReadCapacityUnits": 10
+            },
+            "StreamSpecification": {
+              "StreamViewType" : "NEW_AND_OLD_IMAGES"
+          }
+        }
+    },
+
+    "EventsToDynamoV2Rule": {
+      "Type": "AWS::IoT::TopicRule",
+      "Properties": {
+        "TopicRulePayload": {
+          "AwsIotSqlVersion": "2016-03-23",
+          "RuleDisabled": false,
+          "Sql": "SELECT newuuid() as uuid, * FROM '$aws/events/#' WHERE topic(3) = 'thing' OR topic(3) = 'thingGroup' OR topic(3) = 'thingType' OR topic(3) = 'thingTypeAssociation' OR topic(3) = 'thingGroupMembership' OR topic(3) = 'thingGroupHierarchy'",
+          "Actions": [{
+            "DynamoDBv2": {
+                "PutItem": {
+                    "TableName": "IoTMRProvisioning"
+                },
+                "RoleArn": { "Fn::GetAtt" : ["IoTAccessServicesRole", "Arn"] }
+              }
+            }]
+          }
+        }
+    },
+
+    "JITRRule": {
+      "Type": "AWS::IoT::TopicRule",
+      "Properties": {
+        "TopicRulePayload": {
+          "AwsIotSqlVersion": "2016-03-23",
+          "RuleDisabled": false,
+          "Sql": "SELECT * FROM '$aws/events/certificates/registered/#' WHERE certificateStatus = \"PENDING_ACTIVATION\"",
+          "Actions": [{
+            "Lambda": {
+              "FunctionArn": { "Fn::GetAtt": ["JITRLambdaFunction", "Arn"] }
+              }
+            }]
+          }
+        }
+    },
+
+    "IoTAccessServicesRole": {
+       "Type": "AWS::IAM::Role",
+       "Properties": {
+          "AssumeRolePolicyDocument": {
+             "Statement": [ {
+                "Effect": "Allow",
+                "Principal": {
+                   "Service": [ "iot.amazonaws.com" ]
+                },
+                "Action": [ "sts:AssumeRole" ]
+             } ]
+          },
+          "ManagedPolicyArns": [
+            "arn:aws:iam::aws:policy/service-role/AWSIoTThingsRegistration",
+            "arn:aws:iam::aws:policy/service-role/AWSIoTLogging",
+            "arn:aws:iam::aws:policy/service-role/AWSIoTRuleActions"
+          ],
+          "Path": "/"
+        }
+    },
+
+    "JITRLambdaFunction": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Code": {
+          "S3Bucket": { "Ref" : "S3BucketForLambda" },
+          "S3Key": "iot-mr-jitr.zip"
+        },
+        "Handler": "lambda_function.lambda_handler",
+        "Role": { "Fn::GetAtt": ["JITRLambdaRole", "Arn"] },
+        "Runtime": "python3.7",
+        "MemorySize" : 256,
+        "Timeout": "30",
+        "TracingConfig": {"Mode": "Active"}
+      }
+    },
+
+    "JITRLambdaPermission": {
+        "Type" : "AWS::Lambda::Permission",
+        "Properties" : {
+            "Action" : "lambda:InvokeFunction",
+            "FunctionName" : { "Fn::GetAtt": ["JITRLambdaFunction", "Arn"] },
+            "Principal" : "iot.amazonaws.com",
+            "SourceAccount" : { "Ref": "AWS::AccountId" },
+            "SourceArn" : { "Fn::GetAtt" : ["JITRRule", "Arn"] }
+          }
+      },
+
+    "JITRLambdaRole": {
+       "Type": "AWS::IAM::Role",
+       "Properties": {
+          "AssumeRolePolicyDocument": {
+             "Statement": [ {
+                "Effect": "Allow",
+                "Principal": {
+                   "Service": [ "lambda.amazonaws.com" ]
+                },
+                "Action": [ "sts:AssumeRole" ]
+             } ]
+          },
+          "Policies": [ {
+             "PolicyName": {"Fn::Join": ["", ["JITRLambdaPolicy-", {"Ref": "AWS::Region"} ]]},
+             "PolicyDocument": {
+                 "Version":"2012-10-17",
+                 "Statement":[
+                   {
+                     "Effect": "Allow",
+                     "Action": [
+                       "logs:CreateLogGroup",
+                       "logs:CreateLogStream",
+                       "logs:PutLogEvents"
+                     ],
+                     "Resource": "arn:aws:logs:*:*:*"
+                   },
+                   {
+                      "Effect": "Allow",
+                      "Action": [
+                          "xray:PutTraceSegments",
+                          "xray:PutTelemetryRecords"
+                      ],
+                      "Resource": [
+                          "*"
+                      ]
+                  },
+                  {
+                    "Effect": "Allow",
+                    "Action": [
+                        "iot:GetPolicy",
+                        "iot:CreateThing",
+                        "iot:AttachPolicy",
+                        "iot:AttachThingPrincipal",
+                        "iot:DescribeThing",
+                        "iot:DescribeCertificate",
+                        "iot:CreatePolicy",
+                        "iot:UpdateCertificate"
+                    ],
+                    "Resource": "*"
+                  }
+                ]
+              }
+             }
+           ],
+          "Path": "/"
+        }
+    }
+  },
+
+  "Outputs" : {
+    "IoTAccessServicesRoleArn" : {
+      "Description" : "Arn of the role for IoT topic rule actions",
+      "Value" : {"Fn::GetAtt" : ["IoTAccessServicesRole", "Arn"] }
+    },
+    "JITRLambdaFunctionName" : {
+      "Description" : "Name of the JITR Lambda function",
+      "Value" : {"Ref": "JITRLambdaFunction"}
+    }
+  }
+}

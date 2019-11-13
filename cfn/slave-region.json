@@ -1,0 +1,459 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+
+  "Description" : "AWS CloudFormation template for IoT multi region. Slave region.",
+
+  "Parameters" : {
+    "S3BucketForLambda" : {
+      "Description" : "S3 bucket where you copied the lambda installation packages to.",
+      "Type" : "String"
+    }
+  },
+
+  "Resources" : {
+
+    "ProvisioningDynamoDBTable" : {
+      "Type" : "AWS::DynamoDB::Table",
+          "Properties" : {
+            "TableName": "IoTMRProvisioning",
+            "AttributeDefinitions" : [
+              {
+                  "AttributeName": "uuid",
+                  "AttributeType": "S"
+              }
+            ],
+            "KeySchema" : [
+              {
+                  "KeyType": "HASH",
+                  "AttributeName": "uuid"
+              }
+            ],
+            "ProvisionedThroughput" : {
+              "WriteCapacityUnits": 10,
+              "ReadCapacityUnits": 10
+            },
+            "StreamSpecification": {
+              "StreamViewType" : "NEW_AND_OLD_IMAGES"
+          }
+        }
+    },
+
+    "DynamoTriggerMapping": {
+    "Type": "AWS::Lambda::EventSourceMapping",
+    "Properties": {
+        "BatchSize" : 1,
+        "Enabled" : true,
+        "MaximumBatchingWindowInSeconds" : 10,
+        "EventSourceArn": { "Fn::GetAtt": ["ProvisioningDynamoDBTable", "StreamArn"] },
+        "FunctionName": { "Fn::GetAtt": ["SFNDynamoTriggerLambdaFunction", "Arn"] },
+        "StartingPosition": "LATEST"
+      }
+    },
+
+
+    "JITRRule": {
+      "Type": "AWS::IoT::TopicRule",
+      "Properties": {
+        "TopicRulePayload": {
+          "AwsIotSqlVersion": "2016-03-23",
+          "RuleDisabled": false,
+          "Sql": "SELECT * FROM '$aws/events/certificates/registered/#' WHERE certificateStatus = \"PENDING_ACTIVATION\"",
+          "Actions": [{
+            "Lambda": {
+              "FunctionArn": { "Fn::GetAtt": ["JITRLambdaFunction", "Arn"] }
+              }
+            }]
+          }
+        }
+    },
+
+    "IoTAccessServicesRole": {
+       "Type": "AWS::IAM::Role",
+       "Properties": {
+          "AssumeRolePolicyDocument": {
+             "Statement": [ {
+                "Effect": "Allow",
+                "Principal": {
+                   "Service": [ "iot.amazonaws.com" ]
+                },
+                "Action": [ "sts:AssumeRole" ]
+             } ]
+          },
+          "ManagedPolicyArns": [
+            "arn:aws:iam::aws:policy/service-role/AWSIoTThingsRegistration",
+            "arn:aws:iam::aws:policy/service-role/AWSIoTLogging",
+            "arn:aws:iam::aws:policy/service-role/AWSIoTRuleActions"
+          ],
+          "Path": "/"
+        }
+    },
+
+    "JITRLambdaFunction": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Code": {
+          "S3Bucket": { "Ref" : "S3BucketForLambda" },
+          "S3Key": "iot-mr-jitr.zip"
+        },
+        "Handler": "lambda_function.lambda_handler",
+        "Role": { "Fn::GetAtt": ["JITRLambdaRole", "Arn"] },
+        "Runtime": "python3.7",
+        "MemorySize" : 256,
+        "Timeout": "30",
+        "TracingConfig": {"Mode": "Active"}
+      }
+    },
+
+    "JITRLambdaPermission": {
+        "Type" : "AWS::Lambda::Permission",
+        "Properties" : {
+            "Action" : "lambda:InvokeFunction",
+            "FunctionName" : { "Fn::GetAtt": ["JITRLambdaFunction", "Arn"] },
+            "Principal" : "iot.amazonaws.com",
+            "SourceAccount" : { "Ref": "AWS::AccountId" },
+            "SourceArn" : { "Fn::GetAtt" : ["JITRRule", "Arn"] }
+          }
+      },
+
+      "CrossRegionLambdaFunction": {
+        "Type": "AWS::Lambda::Function",
+        "Properties": {
+          "Code": {
+            "S3Bucket": { "Ref" : "S3BucketForLambda" },
+            "S3Key": "iot-mr-cross-region.zip"
+          },
+          "Handler": "lambda_function.lambda_handler",
+          "Role": { "Fn::GetAtt": ["SFNLambdaRole", "Arn"] },
+          "Runtime": "python3.7",
+          "MemorySize" : 256,
+          "Timeout": "30",
+          "TracingConfig": {"Mode": "Active"}
+        }
+      },
+
+    "JITRLambdaRole": {
+       "Type": "AWS::IAM::Role",
+       "Properties": {
+          "AssumeRolePolicyDocument": {
+             "Statement": [ {
+                "Effect": "Allow",
+                "Principal": {
+                   "Service": [ "lambda.amazonaws.com" ]
+                },
+                "Action": [ "sts:AssumeRole" ]
+             } ]
+          },
+          "Policies": [ {
+             "PolicyName": {"Fn::Join": ["", ["JITRLambdaPolicy-", {"Ref": "AWS::Region"} ]]},
+             "PolicyDocument": {
+                 "Version":"2012-10-17",
+                 "Statement":[
+                   {
+                     "Effect": "Allow",
+                     "Action": [
+                       "logs:CreateLogGroup",
+                       "logs:CreateLogStream",
+                       "logs:PutLogEvents"
+                     ],
+                     "Resource": "arn:aws:logs:*:*:*"
+                   },
+                   {
+                      "Effect": "Allow",
+                      "Action": [
+                          "xray:PutTraceSegments",
+                          "xray:PutTelemetryRecords"
+                      ],
+                      "Resource": [
+                          "*"
+                      ]
+                  },
+                  {
+                    "Effect": "Allow",
+                    "Action": [
+                        "iot:GetPolicy",
+                        "iot:CreateThing",
+                        "iot:AttachPolicy",
+                        "iot:AttachThingPrincipal",
+                        "iot:DescribeThing",
+                        "iot:DescribeCertificate",
+                        "iot:CreatePolicy",
+                        "iot:UpdateCertificate"
+                    ],
+                    "Resource": "*"
+                  }
+                ]
+              }
+             }
+            ],
+          "Path": "/"
+        }
+    },
+
+
+    "SFNLambdaRole": {
+       "Type": "AWS::IAM::Role",
+       "Properties": {
+          "AssumeRolePolicyDocument": {
+             "Statement": [ {
+                "Effect": "Allow",
+                "Principal": {
+                   "Service": [ "lambda.amazonaws.com" ]
+                },
+                "Action": [ "sts:AssumeRole" ]
+             } ]
+          },
+          "Policies": [ {
+             "PolicyName": {"Fn::Join": ["", ["SFNLambdaPolicy-", {"Ref": "AWS::Region"} ]]},
+             "PolicyDocument": {
+                 "Version":"2012-10-17",
+                 "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "dynamodb:GetShardIterator",
+                            "dynamodb:ListStreams",
+                            "dynamodb:DescribeStream",
+                            "dynamodb:GetRecords"
+                        ],
+                        "Resource": [
+                            {"Fn::Join": ["", ["arn:aws:dynamodb:*:",{ "Ref": "AWS::AccountId" } ,":table/IoTMRProvisioning/stream/*"]]}
+                        ]
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "logs:CreateLogGroup",
+                            "logs:CreateLogStream",
+                            "logs:PutLogEvents"
+                        ],
+                        "Resource": "arn:aws:logs:*:*:*"
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "iot:GetPolicy",
+                            "iot:CreateThing",
+                            "iot:AttachPolicy",
+                            "iot:AttachThingPrincipal",
+                            "iot:DescribeThing",
+                            "iot:DescribeCertificate",
+                            "iot:CreatePolicy",
+                            "iot:UpdateCertificate",
+                            "iot:ListThingPrincipals",
+                            "iot:DetachThingPrincipal",
+                            "iot:ListPrincipalPolicies",
+                            "iot:DetachPolicy",
+                            "iot:DeleteCertificate",
+                            "iot:DeleteThing",
+                            "iot:DescribeThingType",
+                            "iot:CreateThingType",
+                            "iot:UpdateThing"
+                        ],
+                        "Resource": "*"
+                    },
+                    {
+                       "Effect": "Allow",
+                       "Action": [
+                           "xray:PutTraceSegments",
+                           "xray:PutTelemetryRecords"
+                       ],
+                       "Resource": [
+                           "*"
+                       ]
+                   },
+                    {
+                        "Effect": "Allow",
+                        "Action": "states:StartExecution",
+                        "Resource": [
+                            {"Fn::Join": ["", ["arn:aws:states:", {"Ref": "AWS::Region"}, ":", { "Ref": "AWS::AccountId" }, ":stateMachine:*"]]}
+                        ]
+                    }
+                  ]
+                }
+              }
+            ],
+            "Path": "/"
+          }
+    },
+
+    "StateMachineRole": {
+       "Type": "AWS::IAM::Role",
+       "Properties": {
+          "AssumeRolePolicyDocument": {
+             "Statement": [ {
+                "Effect": "Allow",
+                "Principal": {
+                   "Service": [ "states.amazonaws.com" ]
+                },
+                "Action": [ "sts:AssumeRole" ]
+             } ]
+          },
+          "Policies": [ {
+             "PolicyName": {"Fn::Join": ["", ["StateMachninePolicy-", {"Ref": "AWS::Region"} ]]},
+             "PolicyDocument": {
+                 "Version":"2012-10-17",
+                 "Statement": [
+                   {
+                       "Effect": "Allow",
+                       "Action": [
+                           "lambda:InvokeFunction"
+                       ],
+                       "Resource": [
+                           { "Fn::GetAtt": ["SFNThingCrudLambdaFunction", "Arn"] },
+                           { "Fn::GetAtt": ["SFNThingTypeCrudLambdaFunction", "Arn"] }
+                       ]
+                   }
+                   ] } } ],
+          "Path": "/"
+        }
+    },
+
+    "SFNDynamoTriggerLambdaFunction": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Code": {
+          "S3Bucket": { "Ref" : "S3BucketForLambda" },
+          "S3Key": "sfn-iot-mr-dynamo-trigger.zip"
+        },
+        "Environment": {
+          "Variables" : {
+            "STATEMACHINE_ARN": { "Ref": "ProvisioningStateMachine" }
+          }
+        },
+        "Handler": "lambda_function.lambda_handler",
+        "Role": { "Fn::GetAtt": ["SFNLambdaRole", "Arn"] },
+        "Runtime": "python3.7",
+        "MemorySize" : 256,
+        "Timeout": "30",
+        "TracingConfig": {"Mode": "Active"}
+      }
+    },
+
+    "SFNThingCrudLambdaFunction": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Code": {
+          "S3Bucket": { "Ref" : "S3BucketForLambda" },
+          "S3Key": "sfn-iot-mr-thing-crud.zip"
+        },
+        "Handler": "lambda_function.lambda_handler",
+        "Role": { "Fn::GetAtt": ["SFNLambdaRole", "Arn"] },
+        "Runtime": "python3.7",
+        "MemorySize" : 256,
+        "Timeout": "30",
+        "TracingConfig": {"Mode": "Active"}
+      }
+    },
+
+    "SFNThingTypeCrudLambdaFunction": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Code": {
+          "S3Bucket": { "Ref" : "S3BucketForLambda" },
+          "S3Key": "sfn-iot-mr-thing-type-crud.zip"
+        },
+        "Handler": "lambda_function.lambda_handler",
+        "Role": { "Fn::GetAtt": ["SFNLambdaRole", "Arn"] },
+        "Runtime": "python3.7",
+        "MemorySize" : 256,
+        "Timeout": "30",
+        "TracingConfig": {"Mode": "Active"}
+      }
+    },
+
+
+    "ProvisioningStateMachine": {
+       "Type": "AWS::StepFunctions::StateMachine",
+          "Properties": {
+             "DefinitionString" : {
+               "Fn::Join": [ "",
+                  [
+                    "{\n",
+                    "  \"StartAt\": \"ChoiceEventType\",\n",
+                    "  \"States\": {\n",
+                    "    \"ChoiceEventType\": {\n",
+                    "      \"Type\" : \"Choice\",\n",
+                    "      \"Choices\": [\n",
+                    "        {\n",
+                    "          \"Variable\": \"$.NewImage.eventType.S\",\n",
+                    "          \"StringEquals\": \"THING_EVENT\",\n",
+                    "          \"Next\": \"ThingCrud\"\n",
+                    "        },\n",
+                    "        {\n",
+                    "          \"Or\": [\n",
+                    "             {\n",
+                    "              \"Variable\": \"$.NewImage.eventType.S\",\n",
+                    "              \"StringEquals\": \"THING_TYPE_EVENT\"\n",
+                    "            },\n",
+                    "            {\n",
+                    "              \"Variable\": \"$.NewImage.eventType.S\",\n",
+                    "              \"StringEquals\": \"THING_TYPE_ASSOCIATION_EVENT\"\n",
+                    "            }\n",
+                    "        ],\n",
+                    "        \"Next\": \"ThingTypeCrud\"\n",
+                    "        }\n",
+                    "      ],\n",
+                    "      \"Default\": \"DefaultState\"\n",
+                    "    },\n",
+                    "    \"ThingCrud\": {\n",
+                    "      \"Type\" : \"Task\",\n",
+                    "      \"Resource\": \"",{ "Fn::GetAtt": ["SFNThingCrudLambdaFunction", "Arn"] },"\",\n",
+                    "      \"End\": true,\n",
+                    "      \"Retry\": [ {\n",
+                    "        \"ErrorEquals\": [ \"ThingCrudException\" ],\n",
+                    "        \"IntervalSeconds\": 3,\n",
+                    "        \"BackoffRate\": 2.0,\n",
+                    "        \"MaxAttempts\": 3\n",
+                    "     } ]\n",
+                    "    },\n",
+                    "    \"ThingTypeCrud\": {\n",
+                    "      \"Type\" : \"Task\",\n",
+                    "      \"Resource\": \"",{ "Fn::GetAtt": ["SFNThingTypeCrudLambdaFunction", "Arn"] },"\",\n",
+                    "      \"End\": true,\n",
+                    "      \"Retry\": [ {\n",
+                    "        \"ErrorEquals\": [ \"ThingTypeCrudException\" ],\n",
+                    "        \"IntervalSeconds\": 3,\n",
+                    "        \"BackoffRate\": 2.0,\n",
+                    "        \"MaxAttempts\": 3\n",
+                    "     } ]\n",
+                    "    },\n",
+                    "    \"DefaultState\": {\n",
+                    "      \"Type\": \"Fail\",\n",
+                    "      \"Error\": \"DefaultStateError\",\n",
+                    "      \"Cause\": \"No Matches!\"\n",
+                    "    }\n",
+                    "  }\n",
+                    "}\n"
+                  ]
+               ]
+             },
+             "RoleArn" : { "Fn::GetAtt": ["StateMachineRole", "Arn"] }
+         }
+     }
+
+
+  },
+
+  "Outputs" : {
+    "CrossRegionLambdaFunctionArn" : {
+      "Description" : "Arn of the cross region Lambda function which subscribes to SNS",
+      "Value" : { "Fn::GetAtt": ["CrossRegionLambdaFunction", "Arn"] }
+    },
+    "JITRLambdaFunctionName" : {
+      "Description" : "Name of the JITR Lambda function",
+      "Value" : {"Ref": "JITRLambdaFunction"}
+    },
+    "SFNThingCrudLambdaFunctionName" : {
+      "Description" : "Name of the thing crud Lambda function",
+      "Value" : {"Ref": "SFNThingCrudLambdaFunction"}
+    },
+    "SFNThingTypeCrudLambdaFunctionName" : {
+      "Description" : "Name of the thing type crud Lambda function",
+      "Value" : {"Ref": "SFNThingTypeCrudLambdaFunction"}
+    },
+    "StateMachineARN" : {
+      "Description" : "ARN of the statemachine",
+      "Value" : { "Ref": "ProvisioningStateMachine" }
+    }
+  }
+}
