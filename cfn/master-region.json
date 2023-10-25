@@ -103,7 +103,7 @@
         },
         "Handler": "lambda_function.lambda_handler",
         "Role": { "Fn::GetAtt": ["JITRLambdaRole", "Arn"] },
-        "Runtime": "python3.7",
+        "Runtime": "python3.10",
         "MemorySize" : 256,
         "Timeout": "30",
         "TracingConfig": {"Mode": "Active"}
